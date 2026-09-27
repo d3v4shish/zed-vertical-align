@@ -1,0 +1,15 @@
+[package]
+name = "zed-vertical-align-lsp"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "zed-vertical-align-lsp"
+path = "src/main.rs"
+
+[dependencies]
+tower-lsp = "0.20"
+tokio = { version = "1.0", features = ["io-std", "macros", "rt-multi-thread", "sync"] }
+vertical-align-core = { path = "../vertical-align-core" }

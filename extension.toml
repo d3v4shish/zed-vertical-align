@@ -1,0 +1,19 @@
+id = "zed-vertical-align-lsp"
+name = "Zed Vertical Align"
+description = "Align independent code blocks through Zed's standard formatting commands."
+version = "0.1.0"
+schema_version = 1
+authors = ["d3v4shish"]
+
+[language_servers.zed-vertical-align]
+name = "Zed Vertical Align"
+languages = ["Python", "C", "C++", "Rust", "Go", "JavaScript", "TypeScript"]
+
+[language_servers.zed-vertical-align.language_ids]
+"Python" = "python"
+"C" = "c"
+"C++" = "cpp"
+"Rust" = "rust"
+"Go" = "go"
+"JavaScript" = "javascript"
+"TypeScript" = "typescript"
