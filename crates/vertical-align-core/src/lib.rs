@@ -194,7 +194,7 @@ fn format(
     let mut profile_alignment_rows =
         c_allman_initialized_declaration_alignment_edits(&lines, language_id, tab_size, &mut edits);
     for (row, handled) in
-        python_annotation_alignment_edits(&lines, language_id, tab_size, &mut edits)
+        python_annotation_alignment_edits(&lines, language_id, tab_size, &reflowed_rows, &mut edits)
             .into_iter()
             .enumerate()
     {
@@ -379,6 +379,7 @@ fn python_annotation_alignment_edits(
     lines: &[Line<'_>],
     language_id: &str,
     tab_size: usize,
+    excluded_rows: &[bool],
     edits: &mut Vec<TextEdit>,
 ) -> Vec<bool> {
     let mut handled_rows = vec![false; lines.len()];
@@ -389,6 +390,12 @@ fn python_annotation_alignment_edits(
     let mut groups = Vec::<Vec<(&Line<'_>, PythonAnnotation)>>::new();
     let mut current = Vec::<(&Line<'_>, PythonAnnotation)>::new();
     for line in lines {
+        if excluded_rows.get(line.row).copied().unwrap_or(false) {
+            if !current.is_empty() {
+                groups.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
         let Some(annotation) = parse_python_annotation(line) else {
             if !line.text.trim().is_empty() && !current.is_empty() {
                 groups.push(std::mem::take(&mut current));
@@ -778,8 +785,9 @@ fn layout_python(text: &str, lines: &[Line<'_>], active_rows: &[bool], tab_size:
     let line_ending = line_ending(text);
     let trailing_line_ending = text.ends_with(line_ending);
     let mut result = Vec::with_capacity(lines.len());
-    let mut suites = Vec::<(usize, bool)>::new();
+    let mut suites = Vec::<(usize, bool, bool)>::new();
     let mut delimiters = Vec::<usize>::new();
+    let mut pending_suite = None::<usize>;
 
     for line in lines {
         let source = line.text;
@@ -810,21 +818,38 @@ fn layout_python(text: &str, lines: &[Line<'_>], active_rows: &[bool], tab_size:
                 result.push(source.to_string());
             }
             update_python_delimiters(&code, indent_width, &mut delimiters);
+            if delimiters.is_empty() {
+                if let Some(suite_indent) = pending_suite.take() {
+                    if code_trimmed.ends_with(':') {
+                        suites.push((suite_indent, false, false));
+                    }
+                }
+            }
             continue;
         }
         let continuation = is_python_continuation(code_trimmed);
-        while let Some((suite_indent, has_body)) = suites.last().copied() {
+        let mut inferred_first_body = false;
+        while let Some((suite_indent, has_body, inferred_body)) = suites.last().copied() {
             let infer_first_body = original_indent == suite_indent
                 && !has_body
                 && !continuation
                 && !is_python_declaration(code_trimmed);
-            if original_indent > suite_indent || infer_first_body {
+            let retain_inferred_body = original_indent == suite_indent
+                && has_body
+                && inferred_body
+                && !continuation
+                && !is_python_declaration(code_trimmed);
+            if original_indent > suite_indent || infer_first_body || retain_inferred_body {
+                inferred_first_body = infer_first_body;
                 break;
             }
             suites.pop();
         }
 
-        if let Some((_, has_body)) = suites.last_mut() {
+        if let Some((_, has_body, inferred_body)) = suites.last_mut() {
+            if !*has_body {
+                *inferred_body = inferred_first_body;
+            }
             *has_body = true;
         }
 
@@ -837,10 +862,14 @@ fn layout_python(text: &str, lines: &[Line<'_>], active_rows: &[bool], tab_size:
             result.push(source.to_string());
         }
 
+        let starts_multiline_suite =
+            is_python_suite_header(code_trimmed) && !is_python_suite(code_trimmed);
         update_python_delimiters(&code, indent_width, &mut delimiters);
 
         if !code_trimmed.is_empty() && is_python_suite(code_trimmed) {
-            suites.push((original_indent, false));
+            suites.push((original_indent, false, false));
+        } else if starts_multiline_suite && !delimiters.is_empty() {
+            pending_suite = Some(original_indent);
         }
     }
 
@@ -1981,6 +2010,8 @@ fn python_structural_info(lines: &[Line<'_>]) -> StructuralInfo {
         import_rows: vec![false; lines.len()],
     };
     let mut stack = Vec::new();
+    let mut delimiters = Vec::<usize>::new();
+    let mut pending_suite = None::<(usize, usize)>;
     let mut previous_content = None;
 
     for line in lines {
@@ -1993,6 +2024,7 @@ fn python_structural_info(lines: &[Line<'_>]) -> StructuralInfo {
         let indent_end = indentation(line.text);
         let indent = logical_column(&line.text[..indent_end], 4);
         let attached = is_python_continuation(trimmed);
+        let was_inside_delimiters = !delimiters.is_empty();
         let mut closed = false;
         while stack
             .last()
@@ -2011,8 +2043,18 @@ fn python_structural_info(lines: &[Line<'_>]) -> StructuralInfo {
         if closed && !attached {
             info.required_before[line.row] = true;
         }
+        let begins_suite = is_python_suite_header(trimmed) && !is_python_suite(trimmed);
+        update_python_delimiters(&code, indent, &mut delimiters);
         if is_python_suite(trimmed) {
             stack.push((indent, line.row));
+        } else if was_inside_delimiters && delimiters.is_empty() {
+            if let Some((suite_indent, start)) = pending_suite.take() {
+                if trimmed.ends_with(':') {
+                    stack.push((suite_indent, start));
+                }
+            }
+        } else if begins_suite && !delimiters.is_empty() {
+            pending_suite = Some((indent, line.row));
         }
         previous_content = Some(line.row);
     }
@@ -2053,27 +2095,30 @@ fn python_code(line: &str) -> String {
 }
 
 fn is_python_suite(text: &str) -> bool {
-    text.ends_with(':')
-        && [
-            "if ",
-            "elif ",
-            "else:",
-            "for ",
-            "while ",
-            "try:",
-            "except",
-            "finally:",
-            "def ",
-            "class ",
-            "with ",
-            "match ",
-            "case ",
-            "async def ",
-            "async for ",
-            "async with ",
-        ]
-        .into_iter()
-        .any(|prefix| text.starts_with(prefix))
+    text.ends_with(':') && is_python_suite_header(text)
+}
+
+fn is_python_suite_header(text: &str) -> bool {
+    [
+        "if ",
+        "elif ",
+        "else:",
+        "for ",
+        "while ",
+        "try:",
+        "except",
+        "finally:",
+        "def ",
+        "class ",
+        "with ",
+        "match ",
+        "case ",
+        "async def ",
+        "async for ",
+        "async with ",
+    ]
+    .into_iter()
+    .any(|prefix| text.starts_with(prefix))
 }
 
 fn is_python_continuation(text: &str) -> bool {
@@ -4615,11 +4660,52 @@ mod tests {
     }
 
     #[test]
+    fn python_profile_preserves_multiline_method_suites() {
+        let source = "class WorkerRegistry:\n    def __init__(\n    self,\n    service_name: str,\n    maximum_workers: int,\n    ) -> None:\n    self.service_name: str = service_name\n    self.maximum_workers: int = maximum_workers\n\n    def add(\n    self,\n    stats: ProcessStats,\n    ) -> bool:\n    if len(self.workers) >= self.maximum_workers:\n        self.rejected += 1\n        return False\n\n    self.workers[stats.pid] = stats\n    return True\n\n    def find(\n    self,\n    pid: int,\n    ) -> ProcessStats | None:\n    return self.workers.get(pid)\n";
+        let formatted = apply(source, format_document(source, "python", 4));
+
+        assert!(
+            formatted.contains(
+                "class WorkerRegistry:\n    def __init__(\n        self,\n        service_name"
+            ),
+            "{formatted}"
+        );
+        assert!(
+            formatted.contains("    ) -> None:\n        self.service_name"),
+            "{formatted}"
+        );
+        assert!(
+            formatted.contains(
+                "    ) -> bool:\n        if len(self.workers) >= self.maximum_workers:\n            self.rejected += 1\n            return False"
+            ),
+            "{formatted}"
+        );
+        assert!(
+            formatted.contains(
+                "            return False\n\n        self.workers[stats.pid] = stats\n        return True"
+            ),
+            "{formatted}"
+        );
+        assert!(
+            formatted
+                .contains("    ) -> ProcessStats | None:\n        return self.workers.get(pid)"),
+            "{formatted}"
+        );
+        assert_eq!(format_document_text(&formatted, "python", 4), formatted);
+
+        let selected = apply(&formatted, format_range(&formatted, "python", 4, 1, 5));
+        assert!(
+            selected.contains("    ) -> None:\n        self.service_name"),
+            "{selected}"
+        );
+    }
+
+    #[test]
     fn python_keyword_call_reflow_skips_compact_and_ambiguous_calls() {
         let source = "def build():\ncompact = ProcessStats(pid=1, thread_count=2)\npositional = ProcessStats(\n1,\n2,\n)\nspread = ProcessStats(\npid=1,\n**options,\n)\ncommented = ProcessStats(\n# leave this comment alone\npid=1,\nthread_count=2,\n)\n";
         let formatted = apply(source, format_document(source, "python", 4));
         assert!(
-            formatted.contains("    compact = ProcessStats(pid=1, thread_count=2)"),
+            formatted.contains("ProcessStats(pid=1, thread_count=2)"),
             "{formatted}"
         );
         assert!(

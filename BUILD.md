@@ -29,8 +29,8 @@ tag beginning with `v` creates or updates the matching GitHub Release with those
 archives and the extension WASM artifact.
 
 ```bash
-git tag -a v0.1.1 -m 'v0.1.1'
-git push origin v0.1.1
+git tag -a v0.1.2 -m 'v0.1.2'
+git push origin v0.1.2
 ```
 
 On macOS, download the archive matching `uname -m` (`arm64` for Apple Silicon,

@@ -1,5 +1,12 @@
 # Zed Vertical Align extension
 
+- [x] Preserve Python suite indentation after multiline headers.
+  - Contract: a multiline `def`, `class`, or control-flow header records its suite
+    when its closing delimiter line ends in `:`, so its body remains nested and
+    syntactically valid.
+  - Validation: nested `WorkerRegistry` method regression, idempotence,
+    range-formatting safety, workspace tests, build, and benchmark.
+
 - [x] Publish reproducible GitHub release artifacts.
   - Contract: GitHub Actions validates Linux/WASM, packages Linux x86_64 and both
     native macOS helper architectures with SHA-256 checksums, and publishes all

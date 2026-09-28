@@ -6,7 +6,7 @@ continuation depth, brace/class-section tracking, multiline designated-initializ
 state, aggregate-boundary detection, declaration-run classification, signature
 reflow/qualifier parsing, C++ constructor-initializer collection, Rust lifetime
 recognition, attached-gap classification, static output-literal recognition, Python keyword-call
-recognition, and Python-suite tracking), logical-column
+recognition, multiline-header suite tracking, and Python-suite tracking), logical-column
 computation, UTF-16 position conversion, and copying the composed
 formatted document. The profile formatter has no process, I/O, or network boundary,
 so Format Document latency is determined by the in-memory planner and never blocks

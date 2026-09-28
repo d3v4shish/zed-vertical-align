@@ -144,6 +144,9 @@ and their members eight.
 Existing multiline Python calls with two or more simple keyword arguments keep the
 first argument after `(`, align later argument names beneath it, and use one aligned
 ` = ` column. Compact, positional, spread, commented, and malformed calls are left alone.
+Multiline Python `def`, `class`, and control-flow headers record their suite when
+their closing delimiter line ends in `:`, so their nested bodies retain valid
+indentation during document and selection formatting.
 Contiguous standard output and diagnostic calls also align simple static labels on
 `:`, `=`, or `|` inside their string literals. This intentionally changes rendered
 output spacing; dynamic, raw, multiline, URL-like, and custom-wrapper strings are left alone.

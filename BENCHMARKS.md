@@ -214,3 +214,16 @@ validation measurements, not a performance-improvement claim.
   is pushed.
 - The release workflow changes packaging only. It does not alter the in-memory
   planner, its fixed benchmark inputs, or formatter runtime boundaries.
+
+## Python multiline-suite validation: 2026-09-29
+
+- Command: `scripts/benchmark.sh`
+- Assignment input: fixed 10,000-row document; one composed document edit planned
+  in 125.55 ms.
+- C++ input: fixed 10,000-row alternating simple-declaration document; one composed
+  document edit planned in 199.21 ms.
+- Environment: x86_64, AMD Ryzen 7 7800X3D (8 cores / 16 threads), 60 GiB RAM.
+- I/O, network, and contention: none during the measured in-memory planner invocation.
+
+The multiline Python suite scanner adds only linear lexical state. These validation
+measurements document its current cost and do not claim an improvement.

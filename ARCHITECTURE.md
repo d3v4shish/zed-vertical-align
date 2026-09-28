@@ -39,6 +39,10 @@ reflows existing multiline calls whose top-level entries are simple keyword argu
 The call pass keeps its first argument after `(`, aligns later names and their `=`
 separators locally, preserves trailing commas, and rejects positional, spread,
 commented, raw, multiline, and malformed argument forms.
+The structural scanner also defers Python suite creation for a multiline `def`,
+`class`, or control-flow header until its closing delimiter line ends in `:`. It
+tracks whether a suite body was inferred from malformed indentation, preventing
+that recovery behavior from swallowing a normally indented nested suite.
 After ordinary code alignment, a separate literal-content pass recognizes only standard
 output and diagnostic APIs. It aligns safe static labels on `:`, `=`, or `|` in contiguous
 local groups for C, C++, Rust, Go, Python, JavaScript, and TypeScript. C++ stream-head
