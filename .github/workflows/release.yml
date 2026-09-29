@@ -21,6 +21,7 @@ jobs:
         with:
           toolchain: 1.97.1
           targets: wasm32-wasip2
+          components: rustfmt, clippy
       - run: scripts/test.sh
       - run: scripts/build.sh
 

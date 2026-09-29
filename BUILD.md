@@ -30,8 +30,8 @@ matching GitHub Release with checksummed helper archives and an installable
 extension bundle.
 
 ```bash
-git tag -a v0.1.3 -m 'v0.1.3'
-git push origin v0.1.3
+git tag -a v0.1.4 -m 'v0.1.4'
+git push origin v0.1.4
 ```
 
 Download the helper archive matching the host, verify its adjacent checksum, and

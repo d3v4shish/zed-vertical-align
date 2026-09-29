@@ -1,7 +1,7 @@
 id = "vertical-align-lsp"
 name = "Zed Vertical Align"
 description = "Align independent code blocks through Zed's standard formatting commands."
-version = "0.1.3"
+version = "0.1.4"
 schema_version = 1
 authors = ["d3v4shish"]
 
