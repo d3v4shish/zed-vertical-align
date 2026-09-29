@@ -1036,14 +1036,14 @@ dependencies = [
 
 [[package]]
 name = "zed-vertical-align-extension"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "zed_extension_api",
 ]
 
 [[package]]
 name = "zed-vertical-align-lsp"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "tokio",
  "tower-lsp",

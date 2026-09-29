@@ -227,3 +227,17 @@ validation measurements, not a performance-improvement claim.
 
 The multiline Python suite scanner adds only linear lexical state. These validation
 measurements document its current cost and do not claim an improvement.
+
+## Stability-guard validation: 2026-09-29
+
+- Command: \`scripts/benchmark.sh\`
+- Assignment input: fixed 10,000-row document; one composed document edit planned
+  in 191.43 ms.
+- C++ input: fixed 10,000-row alternating simple-declaration document; one composed
+  document edit planned in 243.18 ms.
+- Environment: x86_64, AMD Ryzen 7 7800X3D (8 cores / 16 threads), 60 GiB RAM.
+- I/O, network, and contention: none during the measured in-memory planner invocation.
+
+Multiline-literal exclusion and unmatched-delimiter rejection each add a lexical
+scan before layout. These measurements record the safety cost; they do not claim a
+performance improvement.

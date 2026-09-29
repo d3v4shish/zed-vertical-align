@@ -9,7 +9,9 @@ use tower_lsp::lsp_types::{
     TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use vertical_align_core::{format_document_text, format_range, TextEdit as CoreTextEdit};
+use vertical_align_core::{
+    format_document_text_with_options, format_range_with_options, TextEdit as CoreTextEdit,
+};
 
 #[cfg(test)]
 use vertical_align_core::format_document;
@@ -99,7 +101,12 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         let tab_size = params.options.tab_size as usize;
-        let formatted = format_document_text(&document.text, &document.language_id, tab_size);
+        let formatted = format_document_text_with_options(
+            &document.text,
+            &document.language_id,
+            tab_size,
+            params.options.insert_spaces,
+        );
         Ok(Some(whole_document_edit(&document.text, formatted)))
     }
 
@@ -113,10 +120,11 @@ impl LanguageServer for Backend {
         let (start, end) = requested_lines(&params.range);
         Ok(Some(to_lsp_edits(
             &document.text,
-            format_range(
+            format_range_with_options(
                 &document.text,
                 &document.language_id,
                 params.options.tab_size as usize,
+                params.options.insert_spaces,
                 start,
                 end,
             ),

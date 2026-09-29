@@ -22,21 +22,27 @@ build. `scripts/run.sh` runs the helper with `--stdio`.
 
 ## GitHub release builds
 
-`.github/workflows/release.yml` runs the deterministic tests and Linux/WASM build
-on every pull request and push to `main`. It then creates helper archives and
-SHA-256 checksums for Linux x86_64, macOS Apple Silicon, and macOS Intel. Pushing a
-tag beginning with `v` creates or updates the matching GitHub Release with those
-archives and the extension WASM artifact.
+`.github/workflows/release.yml` runs formatting, strict Clippy, workspace tests,
+and the Linux/WASM build on every pull request and push to `main`. It then builds
+and smoke-tests the native LSP helper on Linux x86_64, Windows x86_64, macOS Apple
+Silicon, and macOS Intel. Pushing a tag beginning with `v` creates or updates the
+matching GitHub Release with checksummed helper archives and an installable
+extension bundle.
 
 ```bash
-git tag -a v0.1.2 -m 'v0.1.2'
-git push origin v0.1.2
+git tag -a v0.1.3 -m 'v0.1.3'
+git push origin v0.1.3
 ```
 
-On macOS, download the archive matching `uname -m` (`arm64` for Apple Silicon,
-`x86_64` for Intel), verify its adjacent checksum, extract it, and install the
-`zed-vertical-align-lsp` executable on the PATH visible to Zed. The archive keeps
-the executable bit.
+Download the helper archive matching the host, verify its adjacent checksum, and
+install the contained executable on the PATH visible to Zed. The macOS archive
+matches `uname -m` (`arm64` for Apple Silicon, `x86_64` for Intel); Windows uses a
+ZIP archive and `Get-FileHash -Algorithm SHA256`; Linux and macOS use `shasum -a
+256 -c <checksum-file>`. The archive keeps the executable bit on Linux and macOS.
+
+The release also contains `zed-vertical-align-extension.tar.gz`. Extract it and
+select its `vertical-align-lsp` directory in `zed: install dev extension`. This
+works before the extension is listed in Zed's public Extension Gallery.
 
 ## Local Zed installation
 
@@ -55,3 +61,12 @@ the executable bit.
 
 The script refuses to replace a normal extension or a different dev extension.
 The extension never downloads binaries and does not alter a worktree.
+
+On Windows, build and install the helper with PowerShell:
+
+```powershell
+.\scripts\install-helper.ps1 -BinDir "$env:LOCALAPPDATA\Programs\ZedVerticalAlign"
+```
+
+Add that directory to the user PATH, restart Zed, then install the extension bundle
+and add the settings from README.md.

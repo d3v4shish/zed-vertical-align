@@ -4,14 +4,18 @@ The root crate is a Zed WebAssembly extension. It registers one formatter-only
 language server for Python, C, C++, Rust, Go, JavaScript, and TypeScript and starts
 `zed-vertical-align-lsp` from Zed's PATH.
 
-`vertical-align-core` is a pure synchronous planner. It first applies a lexical,
+`vertical-align-core` is a pure synchronous planner. It first rejects documents
+with unmatched parentheses, brackets, or braces. It then applies a lexical,
 language-aware structural layout pass, then partitions compatible rows into
 independent blocks and creates whitespace/reflow edits. The C-like pass tracks
 braces, multiline delimiters, C++ templates, and class access sections; Python
 tracks suites and attached continuations. C++ access labels are indented one level
 inside their class and member declarations another level inside the active section.
 
-After layout and before alignment, the planner performs a language-aware
+Rows containing multiline Python strings, Go raw strings, Rust raw strings,
+JavaScript template strings, C/C++ raw strings, and block comments are preserved
+verbatim during structural layout and spacing. After layout and before alignment,
+the planner performs a language-aware
 structural-spacing pass.
 It tracks brace blocks for C, C++, Rust, Go, JavaScript, and TypeScript; it tracks
 indentation suites for Python. The pass adds one blank separator only when a finished
@@ -54,11 +58,13 @@ Selection both call the pure core directly, so original spacing is never flatten
 an external formatter. Both paths return one composed LSP edit.
 
 Formatting requests are asynchronous at the LSP boundary. The core has no shared
-state, storage, network, process, or file-system boundary. The LSP document map is
+state, storage, network, process, or file-system boundary. The LSP passes Zed's tab
+size and `insert_spaces` setting into the core. The LSP document map is
 keyed by URI and protected by an async mutex.
 
 The release boundary is GitHub Actions. It runs deterministic Linux tests and a
-WASM build, then compiles the same native LSP source on Linux x86_64, macOS arm64,
-and macOS x86_64 runners. Each helper is packaged with a SHA-256 checksum; version
-tags publish those archives and the WebAssembly extension as GitHub Release assets.
+WASM build, then compiles and smoke-tests the same native LSP source on Linux
+x86_64, Windows x86_64, macOS arm64, and macOS x86_64 runners. Each helper is
+packaged with a SHA-256 checksum; version tags publish those archives and an
+installable WebAssembly extension bundle as GitHub Release assets.
 The extension and helper make no network calls at runtime.

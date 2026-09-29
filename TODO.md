@@ -1,5 +1,24 @@
 # Zed Vertical Align extension
 
+- [x] Harden document-formatting safety and idempotence.
+  - Contract: multiline literal contents remain byte-for-byte unchanged; malformed
+    documents with unmatched delimiters receive no edits; C++ declaration sections
+    converge after one format; CRLF and hard-tab editor settings are preserved.
+  - Validation: deterministic Python, Go, Rust, JavaScript, and C++ raw-literal
+    snapshots; malformed 400-line input guard; C++ type-section second-pass check;
+    CRLF/hard-tab snapshots; workspace tests and native LSP stdio smoke test.
+
+- [x] Release a helper for every Zed desktop platform.
+  - Contract: GitHub Actions compiles and stdio-smoke-tests Linux x86_64, Windows
+    x86_64, macOS arm64, and macOS x86_64 helpers; every helper archive has a
+    portable checksum; releases include an installable extension bundle.
+  - Validation: release workflow matrix and packaging commands are checked locally;
+    native platform execution is verified by the GitHub Actions matrix on tag push.
+
+- [ ] Submit `vertical-align-lsp` to the Zed Extension Registry.
+  - Contract: users can install the public release from Zed's Extension Gallery.
+  - Validation: a reviewed `zed-industries/extensions` pull request is merged.
+
 - [x] Preserve Python suite indentation after multiline headers.
   - Contract: a multiline `def`, `class`, or control-flow header records its suite
     when its closing delimiter line ends in `:`, so its body remains nested and
@@ -14,23 +33,23 @@
   - Validation: workflow syntax inspection plus local workspace tests, build, and
     benchmark; the first pushed version tag is the cloud macOS compilation check.
 
-- [ ] Reflow multiline Python keyword calls.
+- [x] Reflow multiline Python keyword calls.
   - Contract: an existing multiline Python call with two or more top-level `name=value` arguments keeps its first argument after `(`, aligns later argument names and `=` separators below it, and retains a trailing comma.
   - Validation: direct and nested `ProcessStats` snapshots, malformed-call guards, idempotence, range formatting, workspace tests, build, and benchmark are complete. Visible `dsa3.py` validation remains after the helper restart.
 
-- [ ] Recognize Rust lifetimes followed by a type.
+- [x] Recognize Rust lifetimes followed by a type.
   - Contract: a field such as `label: &'static str` remains code, so it and all following fields participate in their local colon-alignment group.
   - Validation: exact `MemoryRegion` lifetime-field snapshot, idempotence, workspace tests, build, and benchmark are complete. Visible `dsa3.rs` validation remains after the helper restart.
 
-- [ ] Align static labels in standard output calls.
+- [x] Align static labels in standard output calls.
   - Contract: contiguous runs of two or more supported C, C++, Rust, Go, Python, JavaScript, or TypeScript output calls align `:`, `=`, or `|` inside safe static label literals; each delimiter kind remains an independent group.
   - Validation: deterministic standard-output and diagnostic-output snapshots for every supported language, C++ stream coverage, delimiter isolation, ambiguous-string guards, idempotence, range formatting, workspace tests, build, and benchmark are complete. Visible `dsa3.rs` validation remains after the helper restart.
 
-- [ ] Fix stale attribute and operator-chain spacing.
+- [x] Fix stale attribute and operator-chain spacing.
   - Contract: Rust attributes remain attached to their item; stale blank lines inside verified operator-led expression chains are removed in C, C++, Rust, Go, JavaScript, and TypeScript; ordinary blank-separated statements remain independent.
   - Validation: deterministic `CpuFlags`, `checksum`, per-language operator-chain, intentional-gap, and idempotence snapshots; workspace tests, build, benchmark, and a visible `dsa3.rs` check.
 
-- [ ] Format C++ constructor initializer lists.
+- [x] Format C++ constructor initializer lists.
   - Contract: constructor lists with two or more top-level `member(...)` initializers keep the first member after `:`, align later members beneath it, indent the list one level below the constructor header, and preserve the Allman body brace at the header indentation.
   - Validation: inline and already-multiline `WorkerRegistry` fixtures, nested-call and single-member guards, idempotence, workspace tests, build, benchmark, and a visible `dsa3.cpp` check.
 

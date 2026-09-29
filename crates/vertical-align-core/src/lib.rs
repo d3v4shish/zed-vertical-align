@@ -55,6 +55,7 @@ struct MultilineState {
     block_comment: bool,
     quote: Option<u8>,
     triple_quote: Option<u8>,
+    raw_terminator: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -76,13 +77,52 @@ enum LayoutMode {
     PreserveNativeContinuation,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct IndentStyle {
+    tab_size: usize,
+    insert_spaces: bool,
+}
+
+impl IndentStyle {
+    fn new(tab_size: usize, insert_spaces: bool) -> Self {
+        Self {
+            tab_size: tab_size.max(1),
+            insert_spaces,
+        }
+    }
+
+    fn for_columns(self, columns: usize) -> String {
+        if self.insert_spaces {
+            " ".repeat(columns)
+        } else {
+            let tabs = columns / self.tab_size;
+            let spaces = columns % self.tab_size;
+            format!("{}{}", "\t".repeat(tabs), " ".repeat(spaces))
+        }
+    }
+
+    fn one_level(self) -> String {
+        self.for_columns(self.tab_size)
+    }
+}
+
 /// Plans non-overlapping whitespace and declaration-reflow edits for a document.
 /// Compatible rows are aligned only within their own contiguous blocks.
 pub fn format_document(text: &str, language_id: &str, tab_size: usize) -> Vec<TextEdit> {
+    format_document_with_options(text, language_id, tab_size, true)
+}
+
+/// Plans document-formatting edits while honoring the editor's indentation mode.
+pub fn format_document_with_options(
+    text: &str,
+    language_id: &str,
+    tab_size: usize,
+    insert_spaces: bool,
+) -> Vec<TextEdit> {
     format(
         text,
         language_id,
-        tab_size,
+        IndentStyle::new(tab_size, insert_spaces),
         FormatScope::Document,
         LayoutMode::Canonical,
     )
@@ -95,7 +135,20 @@ pub fn format_document(text: &str, language_id: &str, tab_size: usize) -> Vec<Te
 /// deterministic and lets the LSP compose the external and structural passes
 /// into one edit for Zed.
 pub fn format_document_text(text: &str, language_id: &str, tab_size: usize) -> String {
-    apply_text_edits(text, &format_document(text, language_id, tab_size))
+    format_document_text_with_options(text, language_id, tab_size, true)
+}
+
+/// Formats a document while honoring the editor's indentation mode.
+pub fn format_document_text_with_options(
+    text: &str,
+    language_id: &str,
+    tab_size: usize,
+    insert_spaces: bool,
+) -> String {
+    apply_text_edits(
+        text,
+        &format_document_with_options(text, language_id, tab_size, insert_spaces),
+    )
 }
 
 /// Formats text already produced by a language-native formatter.
@@ -109,7 +162,7 @@ pub fn format_document_text_after_native(text: &str, language_id: &str, tab_size
         &format(
             text,
             language_id,
-            tab_size,
+            IndentStyle::new(tab_size, true),
             FormatScope::Document,
             LayoutMode::PreserveNativeContinuation,
         ),
@@ -124,10 +177,22 @@ pub fn format_range(
     start: usize,
     end: usize,
 ) -> Vec<TextEdit> {
+    format_range_with_options(text, language_id, tab_size, true, start, end)
+}
+
+/// Plans range-formatting edits while honoring the editor's indentation mode.
+pub fn format_range_with_options(
+    text: &str,
+    language_id: &str,
+    tab_size: usize,
+    insert_spaces: bool,
+    start: usize,
+    end: usize,
+) -> Vec<TextEdit> {
     format(
         text,
         language_id,
-        tab_size,
+        IndentStyle::new(tab_size, insert_spaces),
         FormatScope::Lines { start, end },
         LayoutMode::Canonical,
     )
@@ -136,7 +201,7 @@ pub fn format_range(
 fn format(
     text: &str,
     language_id: &str,
-    tab_size: usize,
+    indent_style: IndentStyle,
     scope: FormatScope,
     layout_mode: LayoutMode,
 ) -> Vec<TextEdit> {
@@ -144,21 +209,32 @@ fn format(
     if original_lines.is_empty() {
         return Vec::new();
     }
+    let original_literal_rows = multiline_excluded_rows(&original_lines, language_id);
+    if has_unbalanced_delimiters(&original_lines, &original_literal_rows, language_id) {
+        return Vec::new();
+    }
 
     let layout_edits = structural_layout_edits(
         text,
         &original_lines,
+        &original_literal_rows,
         language_id,
-        tab_size,
+        indent_style,
         scope,
         layout_mode,
     );
     let laid_out_text = apply_text_edits(text, &layout_edits);
     let scope = remap_scope(text, &original_lines, &laid_out_text, &layout_edits, scope);
     let laid_out_lines = lines(&laid_out_text);
+    let laid_out_literal_rows = multiline_excluded_rows(&laid_out_lines, language_id);
 
-    let spacing_edits =
-        structural_spacing_edits(&laid_out_text, &laid_out_lines, language_id, scope);
+    let spacing_edits = structural_spacing_edits(
+        &laid_out_text,
+        &laid_out_lines,
+        &laid_out_literal_rows,
+        language_id,
+        scope,
+    );
     let spaced_text = apply_text_edits(&laid_out_text, &spacing_edits);
     let scope = remap_scope(
         &laid_out_text,
@@ -174,7 +250,7 @@ fn format(
         &spaced_text,
         &lines,
         &excluded_rows,
-        tab_size,
+        indent_style,
         language_id,
         scope,
     );
@@ -183,7 +259,7 @@ fn format(
         &lines,
         &excluded_rows,
         &reflowed_rows,
-        tab_size,
+        indent_style,
         language_id,
         scope,
     );
@@ -191,12 +267,21 @@ fn format(
         reflowed_rows[row] |= handled;
     }
     edits.extend(python_keyword_edits);
-    let mut profile_alignment_rows =
-        c_allman_initialized_declaration_alignment_edits(&lines, language_id, tab_size, &mut edits);
-    for (row, handled) in
-        python_annotation_alignment_edits(&lines, language_id, tab_size, &reflowed_rows, &mut edits)
-            .into_iter()
-            .enumerate()
+    let mut profile_alignment_rows = c_allman_initialized_declaration_alignment_edits(
+        &lines,
+        language_id,
+        indent_style.tab_size,
+        &mut edits,
+    );
+    for (row, handled) in python_annotation_alignment_edits(
+        &lines,
+        language_id,
+        indent_style.tab_size,
+        &reflowed_rows,
+        &mut edits,
+    )
+    .into_iter()
+    .enumerate()
     {
         profile_alignment_rows[row] |= handled;
     }
@@ -220,14 +305,18 @@ fn format(
         if group.len() < 2 || !group_intersects_scope(&group, scope) {
             continue;
         }
-        edits.extend(alignment_edits_for_group(&lines, &group, tab_size));
+        edits.extend(alignment_edits_for_group(
+            &lines,
+            &group,
+            indent_style.tab_size,
+        ));
     }
 
     edits.extend(print_label_alignment_edits(
         &lines,
         &excluded_rows,
         language_id,
-        tab_size,
+        indent_style.tab_size,
         scope,
     ));
 
@@ -600,14 +689,12 @@ fn lines(text: &str) -> Vec<Line<'_>> {
         start += raw_line.len();
     }
 
-    if text.is_empty() || !text.ends_with('\n') {
-        if result.is_empty() {
-            result.push(Line {
-                row: 0,
-                start: 0,
-                text,
-            });
-        }
+    if (text.is_empty() || !text.ends_with('\n')) && result.is_empty() {
+        result.push(Line {
+            row: 0,
+            start: 0,
+            text,
+        });
     }
 
     result
@@ -622,33 +709,48 @@ enum LayoutBrace {
 fn structural_layout_edits(
     text: &str,
     source_lines: &[Line<'_>],
+    literal_rows: &[bool],
     language_id: &str,
-    tab_size: usize,
+    indent_style: IndentStyle,
     scope: FormatScope,
     layout_mode: LayoutMode,
 ) -> Vec<TextEdit> {
-    let normalized = if is_c_allman_language(language_id) && matches!(scope, FormatScope::Document)
+    let normalized = if is_c_allman_language(language_id)
+        && matches!(scope, FormatScope::Document)
+        && !literal_rows.iter().any(|row| *row)
     {
-        normalize_c_allman_declaration_lines(text, language_id, tab_size)
+        normalize_c_allman_declaration_lines(text, language_id, indent_style)
     } else {
         text.to_string()
     };
     let lines = lines(&normalized);
-    let info = structural_info(&lines, language_id);
+    let normalized_literal_rows = if normalized == text {
+        literal_rows.to_vec()
+    } else {
+        multiline_excluded_rows(&lines, language_id)
+    };
+    let info = structural_info(&lines, &normalized_literal_rows, language_id);
     let active_rows = if normalized == text {
         structural_active_rows(source_lines.len(), &info.blocks, scope)
     } else {
         vec![true; lines.len()]
     };
     let replacement = if language_id.eq_ignore_ascii_case("python") {
-        layout_python(&normalized, &lines, &active_rows, tab_size)
+        layout_python(
+            &normalized,
+            &lines,
+            &normalized_literal_rows,
+            &active_rows,
+            indent_style,
+        )
     } else {
         layout_c_like(
             &normalized,
             &lines,
+            &normalized_literal_rows,
             &active_rows,
             language_id,
-            tab_size,
+            indent_style,
             layout_mode,
         )
     };
@@ -661,9 +763,10 @@ fn structural_layout_edits(
 fn layout_c_like(
     text: &str,
     lines: &[Line<'_>],
+    literal_rows: &[bool],
     active_rows: &[bool],
     language_id: &str,
-    tab_size: usize,
+    indent_style: IndentStyle,
     layout_mode: LayoutMode,
 ) -> String {
     let line_ending = line_ending(text);
@@ -677,8 +780,11 @@ fn layout_c_like(
     for line in lines {
         let source = line.text;
         let source_trimmed = source.trim();
+        if literal_rows.get(line.row).copied().unwrap_or(false) {
+            result.push(source.to_string());
+            continue;
+        }
         let code = c_like_code(source, &mut scan_state, language_id);
-        let code_trimmed = code.trim();
         let active = active_rows.get(line.row).copied().unwrap_or(true);
 
         if source_trimmed.is_empty() {
@@ -729,8 +835,8 @@ fn layout_c_like(
         } else {
             cpp_access_extra(&braces, depth, language_id)
         };
-        let desired_indent = tab_size.max(1) * (depth + access_extra + continuation_extra);
-        let existing_indent = logical_column(&source[..indentation(source)], tab_size.max(1));
+        let desired_columns = indent_style.tab_size * (depth + access_extra + continuation_extra);
+        let existing_indent = logical_column(&source[..indentation(source)], indent_style.tab_size);
         let preserve_root_continuation = braces.is_empty()
             && continuation_extra > 0
             && !is_declaration_header(source_trimmed, language_id)
@@ -738,17 +844,19 @@ fn layout_c_like(
         let indent_width = if continuation_extra > 0
             && (layout_mode == LayoutMode::PreserveNativeContinuation || preserve_root_continuation)
         {
-            desired_indent.max(existing_indent)
+            desired_columns.max(existing_indent)
         } else {
-            desired_indent
+            desired_columns
         };
-        let indent = " ".repeat(indent_width);
-        let content = if code_trimmed.is_empty() {
-            source_trimmed
+        let indent = if continuation_extra > 0
+            && (layout_mode == LayoutMode::PreserveNativeContinuation || preserve_root_continuation)
+            && existing_indent > desired_columns
+        {
+            source[..indentation(source)].to_string()
         } else {
-            source_trimmed
+            indent_style.for_columns(indent_width)
         };
-        result.push(format!("{indent}{content}"));
+        result.push(format!("{indent}{source_trimmed}"));
 
         if access_label {
             mark_cpp_access_section(&mut braces);
@@ -781,7 +889,13 @@ fn is_designated_initializer_row(text: &str) -> bool {
             .is_some_and(|assignment| assignment > 1 && !text[..assignment].contains('('))
 }
 
-fn layout_python(text: &str, lines: &[Line<'_>], active_rows: &[bool], tab_size: usize) -> String {
+fn layout_python(
+    text: &str,
+    lines: &[Line<'_>],
+    literal_rows: &[bool],
+    active_rows: &[bool],
+    indent_style: IndentStyle,
+) -> String {
     let line_ending = line_ending(text);
     let trailing_line_ending = text.ends_with(line_ending);
     let mut result = Vec::with_capacity(lines.len());
@@ -791,6 +905,10 @@ fn layout_python(text: &str, lines: &[Line<'_>], active_rows: &[bool], tab_size:
 
     for line in lines {
         let source = line.text;
+        if literal_rows.get(line.row).copied().unwrap_or(false) {
+            result.push(source.to_string());
+            continue;
+        }
         let source_trimmed = source.trim();
         if source_trimmed.is_empty() {
             result.push(String::new());
@@ -799,7 +917,7 @@ fn layout_python(text: &str, lines: &[Line<'_>], active_rows: &[bool], tab_size:
 
         let code = python_code(source);
         let code_trimmed = code.trim();
-        let original_indent = logical_column(&source[..indentation(source)], tab_size.max(1));
+        let original_indent = logical_column(&source[..indentation(source)], indent_style.tab_size);
         let inside_delimiters = !delimiters.is_empty();
         let leading_closes = leading_python_delimiter_closes(code_trimmed);
         if inside_delimiters {
@@ -809,11 +927,15 @@ fn layout_python(text: &str, lines: &[Line<'_>], active_rows: &[bool], tab_size:
                     .copied()
                     .unwrap_or(original_indent)
             } else {
-                delimiters.last().copied().unwrap_or(original_indent) + tab_size.max(1)
+                delimiters.last().copied().unwrap_or(original_indent) + indent_style.tab_size
             };
             let active = active_rows.get(line.row).copied().unwrap_or(true);
             if active {
-                result.push(format!("{}{}", " ".repeat(indent_width), source_trimmed));
+                result.push(format!(
+                    "{}{}",
+                    indent_style.for_columns(indent_width),
+                    source_trimmed
+                ));
             } else {
                 result.push(source.to_string());
             }
@@ -854,9 +976,9 @@ fn layout_python(text: &str, lines: &[Line<'_>], active_rows: &[bool], tab_size:
         }
 
         let active = active_rows.get(line.row).copied().unwrap_or(true);
-        let indent_width = tab_size.max(1) * suites.len();
+        let indent_width = indent_style.tab_size * suites.len();
         if active {
-            let indent = " ".repeat(indent_width);
+            let indent = indent_style.for_columns(indent_width);
             result.push(format!("{indent}{source_trimmed}"));
         } else {
             result.push(source.to_string());
@@ -937,7 +1059,7 @@ fn cpp_access_extra(braces: &[LayoutBrace], depth: usize, language_id: &str) -> 
         .find_map(|(index, brace)| match brace {
             LayoutBrace::CppClass {
                 has_access_section: true,
-            } if depth >= index + 1 => Some(1),
+            } if depth > index => Some(1),
             _ => None,
         })
         .unwrap_or(0)
@@ -1002,7 +1124,11 @@ fn update_continuation_depth(code: &str, depth: &mut usize) {
     }
 }
 
-fn normalize_c_allman_declaration_lines(text: &str, language_id: &str, tab_size: usize) -> String {
+fn normalize_c_allman_declaration_lines(
+    text: &str,
+    language_id: &str,
+    indent_style: IndentStyle,
+) -> String {
     let line_ending = line_ending(text);
     let trailing_line_ending = text.ends_with(line_ending);
     let raw_lines = if trailing_line_ending {
@@ -1023,7 +1149,7 @@ fn normalize_c_allman_declaration_lines(text: &str, language_id: &str, tab_size:
                 if !last_field.is_empty() {
                     result.push(format!(
                         "{header_indent}{}{last_field}",
-                        " ".repeat(tab_size.max(1))
+                        indent_style.one_level()
                     ));
                 }
                 result.push(format!("{header_indent}}};"));
@@ -1031,7 +1157,7 @@ fn normalize_c_allman_declaration_lines(text: &str, language_id: &str, tab_size:
             } else {
                 result.push(format!(
                     "{header_indent}{}{trimmed}",
-                    " ".repeat(tab_size.max(1))
+                    indent_style.one_level()
                 ));
             }
             continue;
@@ -1062,20 +1188,20 @@ fn normalize_c_allman_declaration_lines(text: &str, language_id: &str, tab_size:
             source.to_string()
         };
         if is_cpp_language(language_id) {
-            if let Some(expanded) = expand_inline_designated_initializer(&source, tab_size) {
+            if let Some(expanded) = expand_inline_designated_initializer(&source, indent_style) {
                 result.extend(expanded);
                 continue;
             }
             if let Some((header, first_field)) =
                 split_multiline_designated_initializer_start(&source)
             {
-                let field_indent = format!("{indent}{}", " ".repeat(tab_size.max(1)));
+                let field_indent = format!("{indent}{}", indent_style.one_level());
                 result.push(format!("{indent}{header} {{"));
                 result.push(format!("{field_indent}{first_field}"));
                 designated_initializer_indent = Some(indent.to_string());
                 continue;
             }
-            if let Some(expanded) = split_cpp_stream_head(&source, tab_size) {
+            if let Some(expanded) = split_cpp_stream_head(&source, indent_style) {
                 result.extend(expanded);
                 continue;
             }
@@ -1155,7 +1281,10 @@ fn split_allman_header(line: &str, language_id: &str) -> Option<String> {
         })
 }
 
-fn expand_inline_designated_initializer(line: &str, tab_size: usize) -> Option<Vec<String>> {
+fn expand_inline_designated_initializer(
+    line: &str,
+    indent_style: IndentStyle,
+) -> Option<Vec<String>> {
     let trimmed = line.trim();
     let open = trimmed.find('{')?;
     let body = trimmed.get(open + 1..)?.strip_suffix("};")?.trim();
@@ -1172,11 +1301,11 @@ fn expand_inline_designated_initializer(line: &str, tab_size: usize) -> Option<V
     }
     let indent = &line[..line.len() - line.trim_start().len()];
     let header = trimmed[..open].trim_end();
-    let field_indent = format!("{indent}{}", " ".repeat(tab_size.max(1)));
+    let field_indent = format!("{indent}{}", indent_style.one_level());
     let mut result = Vec::with_capacity(fields.len() + 2);
     result.push(format!("{indent}{header} {{"));
     for (index, field) in fields.iter().enumerate() {
-        let comma = (index + 1 < fields.len()).then_some(",").unwrap_or("");
+        let comma = if index + 1 < fields.len() { "," } else { "" };
         result.push(format!(
             "{field_indent}{}{comma}",
             field.trim().trim_end_matches(',')
@@ -1227,7 +1356,7 @@ fn split_top_level_commas(text: &str) -> Vec<&str> {
     result
 }
 
-fn split_cpp_stream_head(line: &str, tab_size: usize) -> Option<Vec<String>> {
+fn split_cpp_stream_head(line: &str, indent_style: IndentStyle) -> Option<Vec<String>> {
     let trimmed = line.trim_start();
     let rest = trimmed.strip_prefix("std::cout")?.trim_start();
     if !rest.starts_with("<<") {
@@ -1236,17 +1365,18 @@ fn split_cpp_stream_head(line: &str, tab_size: usize) -> Option<Vec<String>> {
     let indent = &line[..line.len() - trimmed.len()];
     Some(vec![
         format!("{indent}std::cout"),
-        format!("{indent}{} {rest}", " ".repeat(tab_size.max(1))),
+        format!("{indent}{} {rest}", indent_style.one_level()),
     ])
 }
 
 fn structural_spacing_edits(
     text: &str,
     lines: &[Line<'_>],
+    literal_rows: &[bool],
     language_id: &str,
     scope: FormatScope,
 ) -> Vec<TextEdit> {
-    let info = structural_info(lines, language_id);
+    let info = structural_info(lines, literal_rows, language_id);
     let active_rows = structural_active_rows(lines.len(), &info.blocks, scope);
     let significant_rows = lines
         .iter()
@@ -1269,6 +1399,11 @@ fn structural_spacing_edits(
     for rows in significant_rows.windows(2) {
         let previous = rows[0];
         let next = rows[1];
+        if literal_rows.get(previous).copied().unwrap_or(false)
+            || literal_rows.get(next).copied().unwrap_or(false)
+        {
+            continue;
+        }
         if !gap_is_active(previous, next, &active_rows, scope) {
             continue;
         }
@@ -1295,7 +1430,7 @@ fn structural_spacing_edits(
             } else {
                 existing.to_string()
             };
-        if &text[range.clone()] != replacement {
+        if text.get(range.clone()) != Some(replacement.as_str()) {
             edits.push(TextEdit { range, replacement });
         }
     }
@@ -1305,11 +1440,12 @@ fn structural_spacing_edits(
         && row_is_active(last, &active_rows, scope)
     {
         let range = lines[last].start + lines[last].text.len()..text.len();
-        let replacement = text
-            .ends_with(line_ending)
-            .then_some(line_ending)
-            .unwrap_or_default();
-        if &text[range.clone()] != replacement {
+        let replacement = if text.ends_with(line_ending) {
+            line_ending
+        } else {
+            ""
+        };
+        if text.get(range.clone()) != Some(replacement) {
             edits.push(TextEdit {
                 range,
                 replacement: replacement.to_string(),
@@ -1416,11 +1552,11 @@ fn starts_with_expression_operator(text: &str) -> bool {
     .any(|operator| text.starts_with(operator))
 }
 
-fn structural_info(lines: &[Line<'_>], language_id: &str) -> StructuralInfo {
+fn structural_info(lines: &[Line<'_>], literal_rows: &[bool], language_id: &str) -> StructuralInfo {
     if language_id.eq_ignore_ascii_case("python") {
-        python_structural_info(lines)
+        python_structural_info(lines, literal_rows)
     } else {
-        c_like_structural_info(lines, language_id)
+        c_like_structural_info(lines, literal_rows, language_id)
     }
 }
 
@@ -1431,13 +1567,21 @@ fn structural_active_rows(length: usize, blocks: &[CodeBlock], scope: FormatScop
     };
     let selected_start = start.min(length.saturating_sub(1));
     let selected_end = end.min(length.saturating_sub(1));
-    for row in selected_start..=selected_end {
-        active[row] = true;
+    for value in active
+        .iter_mut()
+        .take(selected_end + 1)
+        .skip(selected_start)
+    {
+        *value = true;
     }
     for block in blocks {
         if block.start <= selected_end && selected_start <= block.end {
-            for row in block.start..=block.end.min(length.saturating_sub(1)) {
-                active[row] = true;
+            for value in active
+                .iter_mut()
+                .take(block.end.min(length.saturating_sub(1)) + 1)
+                .skip(block.start)
+            {
+                *value = true;
             }
             if let Some(next) = active.get_mut(block.end.saturating_add(1)) {
                 *next = true;
@@ -1456,7 +1600,11 @@ fn gap_is_active(previous: usize, next: usize, active_rows: &[bool], scope: Form
     row_is_active(previous, active_rows, scope)
 }
 
-fn c_like_structural_info(lines: &[Line<'_>], language_id: &str) -> StructuralInfo {
+fn c_like_structural_info(
+    lines: &[Line<'_>],
+    literal_rows: &[bool],
+    language_id: &str,
+) -> StructuralInfo {
     let mut info = StructuralInfo {
         blocks: Vec::new(),
         required_before: vec![false; lines.len()],
@@ -1468,6 +1616,9 @@ fn c_like_structural_info(lines: &[Line<'_>], language_id: &str) -> StructuralIn
     let mut go_import_group = false;
 
     for line in lines {
+        if literal_rows.get(line.row).copied().unwrap_or(false) {
+            continue;
+        }
         let code = c_like_code(line.text, &mut scan_state, language_id);
         let trimmed = code.trim();
         let source_trimmed = line.text.trim();
@@ -1615,10 +1766,12 @@ fn mark_c_allman_declaration_type_boundaries(
     let mut declarations = Vec::<(usize, usize, String)>::new();
     for line in lines {
         let trimmed = line.text.trim();
-        let declaration =
-            (!trimmed.is_empty() && !trimmed.starts_with("//") && !trimmed.starts_with("/*"))
-                .then(|| c_like_initialized_declaration_type(trimmed))
-                .flatten();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let declaration = (!trimmed.starts_with("//") && !trimmed.starts_with("/*"))
+            .then(|| c_like_initialized_declaration_type(trimmed))
+            .flatten();
         let indent = indentation(line.text);
         match declaration {
             Some(type_name)
@@ -1996,14 +2149,12 @@ fn is_import_line(text: &str, language_id: &str) -> bool {
         text.starts_with("#include") || text.starts_with("#import")
     } else if language_id.eq_ignore_ascii_case("rust") {
         text.starts_with("use ") || text.starts_with("extern crate ")
-    } else if language_id.eq_ignore_ascii_case("go") {
-        text.starts_with("import ")
     } else {
         text.starts_with("import ")
     }
 }
 
-fn python_structural_info(lines: &[Line<'_>]) -> StructuralInfo {
+fn python_structural_info(lines: &[Line<'_>], literal_rows: &[bool]) -> StructuralInfo {
     let mut info = StructuralInfo {
         blocks: Vec::new(),
         required_before: vec![false; lines.len()],
@@ -2015,6 +2166,9 @@ fn python_structural_info(lines: &[Line<'_>]) -> StructuralInfo {
     let mut previous_content = None;
 
     for line in lines {
+        if literal_rows.get(line.row).copied().unwrap_or(false) {
+            continue;
+        }
         let code = python_code(line.text);
         let trimmed = code.trim();
         info.import_rows[line.row] = trimmed.starts_with("import ") || trimmed.starts_with("from ");
@@ -2127,6 +2281,41 @@ fn is_python_continuation(text: &str) -> bool {
         .any(|prefix| text.starts_with(prefix))
 }
 
+fn has_unbalanced_delimiters(lines: &[Line<'_>], literal_rows: &[bool], language_id: &str) -> bool {
+    let mut delimiters = Vec::new();
+    let mut c_like_state = CLikeScanState::default();
+
+    for line in lines {
+        if literal_rows.get(line.row).copied().unwrap_or(false) {
+            continue;
+        }
+        let code = if language_id.eq_ignore_ascii_case("python") {
+            python_code(line.text)
+        } else {
+            c_like_code(line.text, &mut c_like_state, language_id)
+        };
+        for character in code.chars() {
+            match character {
+                '(' | '[' | '{' => delimiters.push(character),
+                ')' => {
+                    if delimiters.pop() != Some('(') {
+                        return true;
+                    }
+                }
+                ']' => {
+                    if delimiters.pop() != Some('[') {
+                        return true;
+                    }
+                }
+                '}' if delimiters.pop() != Some('{') => return true,
+                _ => {}
+            }
+        }
+    }
+
+    !delimiters.is_empty()
+}
+
 fn multiline_excluded_rows(lines: &[Line<'_>], language_id: &str) -> Vec<bool> {
     let mut state = MultilineState::default();
     lines
@@ -2142,7 +2331,10 @@ fn line_contains_multiline_literal_or_comment(
 ) -> bool {
     let bytes = line.as_bytes();
     let mut offset = 0;
-    let mut excluded = state.block_comment || state.quote.is_some() || state.triple_quote.is_some();
+    let mut excluded = state.block_comment
+        || state.quote.is_some()
+        || state.triple_quote.is_some()
+        || state.raw_terminator.is_some();
     let mut escaped = false;
 
     while offset < bytes.len() {
@@ -2151,6 +2343,17 @@ fn line_contains_multiline_literal_or_comment(
             if bytes[offset..].starts_with(b"*/") {
                 state.block_comment = false;
                 offset += 2;
+            } else {
+                offset += char_len(line, offset);
+            }
+            continue;
+        }
+
+        if let Some(terminator) = &state.raw_terminator {
+            excluded = true;
+            if bytes[offset..].starts_with(terminator) {
+                offset += terminator.len();
+                state.raw_terminator = None;
             } else {
                 offset += char_len(line, offset);
             }
@@ -2180,7 +2383,11 @@ fn line_contains_multiline_literal_or_comment(
             continue;
         }
 
-        if bytes[offset..].starts_with(b"/*") {
+        if let Some(terminator) = raw_string_terminator(&bytes[offset..], language_id) {
+            excluded = true;
+            state.raw_terminator = Some(terminator);
+            offset += 1;
+        } else if bytes[offset..].starts_with(b"/*") {
             state.block_comment = true;
             excluded = true;
             offset += 2;
@@ -2203,7 +2410,41 @@ fn line_contains_multiline_literal_or_comment(
         }
     }
 
-    excluded || state.block_comment || state.quote.is_some() || state.triple_quote.is_some()
+    excluded
+        || state.block_comment
+        || state.quote.is_some()
+        || state.triple_quote.is_some()
+        || state.raw_terminator.is_some()
+}
+
+fn raw_string_terminator(text: &[u8], language_id: &str) -> Option<Vec<u8>> {
+    if language_id.eq_ignore_ascii_case("rust") && text.first() == Some(&b'r') {
+        let hashes = text[1..].iter().take_while(|byte| **byte == b'#').count();
+        if text.get(hashes + 1) == Some(&b'"') {
+            let mut terminator = Vec::with_capacity(hashes + 1);
+            terminator.push(b'"');
+            terminator.extend(std::iter::repeat_n(b'#', hashes));
+            return Some(terminator);
+        }
+    }
+
+    if is_cpp_language(language_id) && text.starts_with(b"R\"") {
+        let delimiter_end = text[2..].iter().position(|byte| *byte == b'(')? + 2;
+        let delimiter = &text[2..delimiter_end];
+        if delimiter
+            .iter()
+            .any(|byte| byte.is_ascii_whitespace() || *byte == b'\\')
+        {
+            return None;
+        }
+        let mut terminator = Vec::with_capacity(delimiter.len() + 2);
+        terminator.push(b')');
+        terminator.extend_from_slice(delimiter);
+        terminator.push(b'"');
+        return Some(terminator);
+    }
+
+    None
 }
 
 fn is_rust_lifetime_start(line: &str, quote_offset: usize) -> bool {
@@ -3208,7 +3449,7 @@ fn reflow_signatures(
     text: &str,
     lines: &[Line<'_>],
     excluded_rows: &[bool],
-    tab_size: usize,
+    indent_style: IndentStyle,
     language_id: &str,
     scope: FormatScope,
 ) -> (Vec<bool>, Vec<TextEdit>) {
@@ -3272,14 +3513,15 @@ fn reflow_signatures(
             suffix,
             &text[open + 1..close],
             &text[range],
-            tab_size,
+            indent_style,
             language_id,
             constructor_initializers.as_ref(),
+            line_ending(text),
         ) else {
             continue;
         };
-        for row in line.row..=end_row {
-            reflowed_rows[row] = true;
+        for handled in reflowed_rows.iter_mut().take(end_row + 1).skip(line.row) {
+            *handled = true;
         }
         edits.push(edit);
     }
@@ -3298,7 +3540,7 @@ fn reflow_python_keyword_calls(
     lines: &[Line<'_>],
     excluded_rows: &[bool],
     signature_rows: &[bool],
-    tab_size: usize,
+    indent_style: IndentStyle,
     language_id: &str,
     scope: FormatScope,
 ) -> (Vec<bool>, Vec<TextEdit>) {
@@ -3359,14 +3601,24 @@ fn reflow_python_keyword_calls(
             }
 
             let suffix = &text[close + 1..close_line.start + close_line.text.len()];
-            let replacement =
-                format_python_keyword_call(start_line, prefix, suffix, &arguments, tab_size);
+            let replacement = format_python_keyword_call(
+                start_line,
+                prefix,
+                suffix,
+                &arguments,
+                indent_style,
+                line_ending(text),
+            );
             if replacement == original {
                 continue;
             }
 
-            for row in start_line.row..=close_row {
-                reflowed_rows[row] = true;
+            for handled in reflowed_rows
+                .iter_mut()
+                .take(close_row + 1)
+                .skip(start_line.row)
+            {
+                *handled = true;
             }
             planned_ranges.push(range.clone());
             edits.push(TextEdit { range, replacement });
@@ -3519,17 +3771,18 @@ fn format_python_keyword_call(
     prefix: &str,
     suffix: &str,
     arguments: &[PythonKeywordArgument],
-    tab_size: usize,
+    indent_style: IndentStyle,
+    line_ending: &str,
 ) -> String {
     let prefix = prefix.trim_end();
     let indent = &start_line.text[..indentation(start_line.text)];
     let name_width = arguments
         .iter()
-        .map(|argument| logical_column(&argument.name, tab_size))
+        .map(|argument| logical_column(&argument.name, indent_style.tab_size))
         .max()
         .unwrap_or_default();
     let format_argument = |argument: &PythonKeywordArgument| {
-        let width = logical_column(&argument.name, tab_size);
+        let width = logical_column(&argument.name, indent_style.tab_size);
         format!(
             "{}{} = {}",
             argument.name,
@@ -3538,13 +3791,14 @@ fn format_python_keyword_call(
         )
     };
     let first = format_argument(&arguments[0]);
-    let continuation_indent = " ".repeat(logical_column(prefix, tab_size) + 1);
+    let continuation_indent =
+        indent_style.for_columns(logical_column(prefix, indent_style.tab_size) + 1);
     let remaining = arguments[1..]
         .iter()
         .map(|argument| format!("{continuation_indent}{},", format_argument(argument)))
         .collect::<Vec<_>>()
-        .join("\n");
-    format!("{prefix}({first},\n{remaining}\n{indent}){suffix}")
+        .join(line_ending);
+    format!("{prefix}({first},{line_ending}{remaining}{line_ending}{indent}){suffix}")
 }
 
 fn signature_intersects_scope(start: usize, end: usize, scope: FormatScope) -> bool {
@@ -3557,6 +3811,7 @@ fn signature_intersects_scope(start: usize, end: usize, scope: FormatScope) -> b
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn reflow_signature(
     start_line: &Line<'_>,
     range: Range<usize>,
@@ -3564,9 +3819,10 @@ fn reflow_signature(
     suffix: &str,
     parameter_text: &str,
     original: &str,
-    tab_size: usize,
+    indent_style: IndentStyle,
     language_id: &str,
     constructor_initializers: Option<&CppConstructorInitializers>,
+    line_ending: &str,
 ) -> Option<TextEdit> {
     let mut parameters = split_parameters(parameter_text);
     if parameters.len() == 1
@@ -3585,41 +3841,43 @@ fn reflow_signature(
         *parameter = parameter.trim().trim_end_matches(',').trim().to_string();
     }
 
-    align_parameters(&mut parameters, tab_size, language_id);
+    align_parameters(&mut parameters, indent_style.tab_size, language_id);
     let indent = &start_line.text[..start_line.text.len() - start_line.text.trim_start().len()];
     if is_c_like_language(language_id) {
         let signature = match parameters.as_slice() {
             [] => format!("{prefix}()"),
             [parameter] => format!("{prefix}({parameter})"),
             [first_parameter, remaining @ ..] => {
-                let parameter_indent = " ".repeat(logical_column(prefix, tab_size) + 1);
+                let parameter_indent =
+                    indent_style.for_columns(logical_column(prefix, indent_style.tab_size) + 1);
                 let remaining_parameters = remaining
                     .iter()
                     .enumerate()
                     .map(|(index, parameter)| {
-                        let comma = (index + 1 < remaining.len()).then_some(",").unwrap_or("");
+                        let comma = if index + 1 < remaining.len() { "," } else { "" };
                         format!("{parameter_indent}{parameter}{comma}")
                     })
                     .collect::<Vec<_>>()
-                    .join("\n");
-                format!("{prefix}({first_parameter},\n{remaining_parameters})")
+                    .join(line_ending);
+                format!("{prefix}({first_parameter},{line_ending}{remaining_parameters})")
             }
         };
         let replacement = if let Some(initializers) = constructor_initializers {
             format!(
-                "{signature}\n{}",
-                format_cpp_constructor_initializers(initializers, indent, tab_size)
+                "{signature}{line_ending}{}",
+                format_cpp_constructor_initializers(
+                    initializers,
+                    indent,
+                    indent_style,
+                    line_ending,
+                )
             )
         } else {
             format!("{signature}{suffix}")
         };
         return (replacement != original).then_some(TextEdit { range, replacement });
     }
-    let continuation_indent = if indent.contains('\t') {
-        format!("{indent}\t")
-    } else {
-        format!("{indent}{}", " ".repeat(tab_size.max(1)))
-    };
+    let continuation_indent = format!("{indent}{}", indent_style.one_level());
     let trailing_comma = !is_c_like_language(language_id);
     let parameter_lines = parameters
         .iter()
@@ -3633,8 +3891,9 @@ fn reflow_signature(
             format!("{continuation_indent}{parameter}{comma}")
         })
         .collect::<Vec<_>>()
-        .join("\n");
-    let replacement = format!("{prefix}(\n{parameter_lines}\n{indent}){suffix}");
+        .join(line_ending);
+    let replacement =
+        format!("{prefix}({line_ending}{parameter_lines}{line_ending}{indent}){suffix}");
     (replacement != original).then_some(TextEdit { range, replacement })
 }
 
@@ -3714,22 +3973,21 @@ fn collect_cpp_constructor_initializers(
 fn format_cpp_constructor_initializers(
     initializers: &CppConstructorInitializers,
     header_indent: &str,
-    tab_size: usize,
+    indent_style: IndentStyle,
+    line_ending: &str,
 ) -> String {
-    let initializer_indent = if header_indent.contains('\t') {
-        format!("{header_indent}\t")
-    } else {
-        format!("{header_indent}{}", " ".repeat(tab_size.max(1)))
-    };
+    let initializer_indent = format!("{header_indent}{}", indent_style.one_level());
     let member_indent = format!("{initializer_indent}  ");
     initializers
         .entries
         .iter()
         .enumerate()
         .map(|(index, initializer)| {
-            let comma = (index + 1 < initializers.entries.len())
-                .then_some(",")
-                .unwrap_or("");
+            let comma = if index + 1 < initializers.entries.len() {
+                ","
+            } else {
+                ""
+            };
             if index == 0 {
                 format!("{initializer_indent}: {initializer}{comma}")
             } else {
@@ -3737,7 +3995,7 @@ fn format_cpp_constructor_initializers(
             }
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join(line_ending)
 }
 
 fn first_open_parenthesis(line: &str) -> Option<usize> {
@@ -4185,17 +4443,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "superseded by vertical-layout profile fixtures"]
-    fn document_aligns_each_block_independently() {
-        let text = "a = 1\nlong_name = 2\n\nx = 3\nlonger_name = 4\n";
-        let result = apply(text, format_document(text, "rust", 4));
-        assert_eq!(
-            result,
-            "a           = 1\nlong_name   = 2\nx           = 3\nlonger_name = 4\n"
-        );
-    }
-
-    #[test]
     fn range_only_changes_intersecting_block() {
         let text = "a = 1\nlong_name = 2\n\nx = 3\nlonger_name = 4\n";
         let result = apply(text, format_range(text, "rust", 4, 0, 0));
@@ -4216,50 +4463,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "superseded by vertical-layout profile fixtures"]
-    fn aligns_cpp_member_declarations() {
-        let text = "    T *ptr; // allocated memory\n    int size;\n    int cap;\n\n    int a;\n    float b ;\n";
-        let result = apply(text, format_document(text, "cpp", 4));
-        assert_eq!(
-            result,
-            "    T     *ptr; // allocated memory\n    int   size;\n    int   cap;\n    int   a;\n    float b;\n"
-        );
-    }
-
-    #[test]
-    #[ignore = "superseded by vertical-layout profile fixtures"]
-    fn reflows_supported_function_declarations() {
-        let cases = [
-            (
-                "def connect(host, retries, secure):",
-                "python",
-                "def connect(\n    host,\n    retries,\n    secure,\n):",
-            ),
-            (
-                "pub fn connect(host: String, retries: u8, secure: bool) -> Result<()> {",
-                "rust",
-                "pub fn connect(\n    host    : String,\n    retries : u8,\n    secure  : bool,\n) -> Result<()> {",
-            ),
-            (
-                "func connect(host string, retries int, secure bool) {",
-                "go",
-                "func connect(\n    host    string,\n    retries int,\n    secure  bool,\n) {",
-            ),
-            (
-                "int connect(char *host, int retries, bool secure) {",
-                "cpp",
-                "int connect(\n    char *host,\n    int   retries,\n    bool  secure\n) {",
-            ),
-        ];
-        for (source, language, expected) in cases {
-            assert_eq!(
-                apply(source, format_document(source, language, 4)),
-                expected
-            );
-        }
-    }
-
-    #[test]
     fn leaves_calls_unchanged() {
         let text = "connect(host, retries, secure);";
         assert!(format_document(text, "typescript", 2).is_empty());
@@ -4275,162 +4478,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "superseded by vertical-layout profile fixtures"]
-    fn aligns_cpp_templates_initializers_streams_and_multiline_constructors() {
-        let declarations =
-            "    std::vector<T> items;\n    std::unordered_map<int, size_t> index;\n";
-        let declarations = apply(declarations, format_document(declarations, "cpp", 4));
-        assert_eq!(
-            declarations
-                .lines()
-                .map(|line| line
-                    .find(if line.contains("items") {
-                        "items"
-                    } else {
-                        "index"
-                    })
-                    .unwrap())
-                .collect::<Vec<_>>(),
-            vec![36, 36]
-        );
-
-        let constructor = "    Employee(int i,\n             std::string name,\n             double salary)\n    {\n";
-        assert_eq!(
-            apply(constructor, format_document(constructor, "cpp", 4)),
-            "    Employee(\n        int         i,\n        std::string name,\n        double      salary\n    ) {\n"
-        );
-
-        let initializers =
-            "        : id(i),\n        name(std::move(name)),\n        salary(salary)\n";
-        assert_eq!(
-            apply(initializers, format_document(initializers, "cpp", 4)),
-            "        : id(i),\n          name(std::move(name)),\n          salary(salary)\n"
-        );
-
-        let streams = "        << \"ID=\" << id\n        << \"Employee name=\" << name\n        << \"Salary=\" << salary;\n";
-        let streams = apply(streams, format_document(streams, "cpp", 4));
-        let columns = streams
-            .lines()
-            .map(|line| line.rfind("<<").unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(columns, vec![28, 28, 28]);
-    }
-
-    #[test]
     fn leaves_cpp_construction_and_multiline_calls_unchanged() {
         let text = "Company company(\n    \"Chaotic Systems\"\n);\nauto employee = find(\n    search_id,\n    retries\n);\n";
         assert!(format_document(text, "cpp", 4).is_empty());
-    }
-
-    #[test]
-    #[ignore = "superseded by vertical-layout profile fixtures"]
-    fn normalizes_cpp_blocks_imports_and_continuations() {
-        let text = "#include <vector>\n\n#include <string>\n\n\nvoid run() {\n    prepare();\n\n\n    if (ready) {\n        work();\n    }\n\n\n    finish();\n}\n\n\nint main() {\n    if (ready) {\n        run();\n    }\n\n    else {\n        recover();\n    }\n\n\n    return 0;\n}\n";
-        assert_eq!(
-            apply(text, format_document(text, "cpp", 4)),
-            "#include <vector>\n#include <string>\n\nvoid run() {\n    prepare();\n    if (ready) {\n        work();\n    }\n\n    finish();\n}\n\nint main() {\n    if (ready) {\n        run();\n    }\n    else {\n        recover();\n    }\n\n    return 0;\n}\n"
-        );
-    }
-
-    #[test]
-    #[ignore = "superseded by vertical-layout profile fixtures"]
-    fn normalizes_python_suites_without_splitting_continuations() {
-        let text = "import os\n\n\n\ndef run():\n    prepare()\n\n\n    if ready:\n        work()\n\n\n    else:\n        recover()\n\n\n    finish()\n\n\ndef main():\n    run()\n";
-        assert_eq!(
-            apply(text, format_document(text, "python", 4)),
-            "import os\n\ndef run():\n    prepare()\n    if ready:\n        work()\n    else:\n        recover()\n\n    finish()\n\ndef main():\n    run()\n"
-        );
-    }
-
-    #[test]
-    #[ignore = "superseded by vertical-layout profile fixtures"]
-    fn keeps_data_braces_contiguous_and_finishes_do_while_blocks() {
-        let text = "const options = {\n    enabled: true,\n};\n\n\ndo {\n    step();\n}\n\nwhile (ready);\nnext();\n";
-        assert_eq!(
-            apply(text, format_document(text, "typescript", 4)),
-            "const options = {\n    enabled: true,\n};\ndo {\n    step();\n}\nwhile (ready);\n\nnext();\n"
-        );
-    }
-
-    #[test]
-    #[ignore = "superseded by vertical-layout profile fixtures"]
-    fn keeps_same_line_else_attached_and_separates_the_finished_block() {
-        let text = "void run() {\nif (ready) {\nfirst();\n} else {\nsecond();\n}\nnext();\n}\n";
-        assert_eq!(
-            apply(text, format_document(text, "cpp", 4)),
-            "void run() {\n    if (ready) {\n        first();\n    } else {\n        second();\n    }\n\n    next();\n}\n"
-        );
-    }
-
-    #[test]
-    #[ignore = "superseded by vertical-layout profile fixtures"]
-    fn preserves_native_continuation_indentation() {
-        let text = "void run() {\n    std::cout << \"first\"\n        << \"second\";\n}\n";
-        assert_eq!(format_document_text_after_native(text, "cpp", 4), text);
-    }
-
-    #[test]
-    #[ignore = "superseded by vertical-layout profile fixtures"]
-    fn range_formatting_normalizes_the_touched_block() {
-        let text =
-            "void run() {\n    first();\n\n\n    second();\n}\n\n\nvoid next() {\n    run();\n}\n";
-        assert_eq!(
-            apply(text, format_range(text, "cpp", 4, 1, 1)),
-            "void run() {\n    first();\n    second();\n}\n\nvoid next() {\n    run();\n}\n"
-        );
-    }
-
-    #[test]
-    #[ignore = "superseded by vertical-layout profile fixtures"]
-    fn range_formatting_remaps_rows_after_spacing_changes() {
-        let text = "void run() {\n    long_name = 1;\n\n\n    x = 2;\n}\n";
-        assert_eq!(
-            apply(text, format_range(text, "cpp", 4, 4, 4)),
-            "void run() {\n    long_name = 1;\n    x         = 2;\n}\n"
-        );
-    }
-
-    #[test]
-    #[ignore = "superseded by vertical-layout profile fixtures"]
-    fn normalizes_every_supported_brace_language() {
-        let cases = [
-            (
-                "#include <stdio.h>\n\n\nvoid run() {\n    step();\n}\n\n\n// Next declaration.\nvoid next() {}\n",
-                "c",
-                "#include <stdio.h>\n\nvoid run() {\n    step();\n}\n\n// Next declaration.\nvoid next() {}\n",
-            ),
-            (
-                "use crate::service;\n\n\nfn run() {\n    step();\n}\n\n\nfn next() {}\n",
-                "rust",
-                "use crate::service;\n\nfn run() {\n    step();\n}\n\nfn next() {}\n",
-            ),
-            (
-                "import \"fmt\"\n\n\nfunc run() {\n    fmt.Println(\"run\")\n}\n\n\nfunc next() {}\n",
-                "go",
-                "import \"fmt\"\n\nfunc run() {\n    fmt.Println(\"run\")\n}\n\nfunc next() {}\n",
-            ),
-            (
-                "import service from \"./service\";\n\n\nfunction run() {\n  service();\n}\n\n\nfunction next() {}\n",
-                "javascript",
-                "import service from \"./service\";\n\nfunction run() {\n    service();\n}\n\nfunction next() {}\n",
-            ),
-        ];
-        for (source, language, expected) in cases {
-            assert_eq!(
-                apply(source, format_document(source, language, 4)),
-                expected
-            );
-        }
-    }
-
-    #[test]
-    #[ignore = "superseded by vertical-layout profile fixtures"]
-    fn lays_out_cpp_templates_access_sections_and_completed_blocks() {
-        let text = "struct Employee\n{\nint id;\nstd::string name;\nEmployee(int i, std::string n)\n{\n}\nvoid print(int value, int width)\n{\nif (value) {\nreturn;\n}\nelse {\nreturn;\n}\n}\n};\ntemplate<typename T> class Repository\n{\nprivate:\nstd::vector<T> items;\npublic:\nvoid add(T value, int count)\n{\n}\n};\n";
-        assert_eq!(
-            apply(text, format_document(text, "cpp", 4)),
-            "struct Employee {\n    int         id;\n    std::string name;\n\n    Employee(\n        int         i,\n        std::string n\n    ) {\n    }\n\n    void print(\n        int value,\n        int width\n    ) {\n        if (value) {\n            return;\n        }\n        else {\n            return;\n        }\n    }\n};\n\ntemplate <typename T>\nclass Repository {\n    private:\n        std::vector<T> items;\n    public:\n        void add(\n            T   value,\n            int count\n        ) {\n        }\n};\n"
-        );
     }
 
     #[test]
@@ -4931,6 +4981,91 @@ mod tests {
         let text = "int first = 1;\n\n\nint second = 2;\n";
         let formatted = apply(text, format_document(text, "cpp", 4));
         assert_eq!(formatted.matches("\n\n\n").count(), 1, "{formatted}");
+    }
+
+    #[test]
+    fn preserves_multiline_literal_contents_and_python_suite_indentation() {
+        let python =
+            "def message():\n    text = \"\"\"\nline one\n  line two\n\"\"\"\n    return text\n";
+        let formatted = format_document_text(python, "python", 4);
+        assert!(
+            formatted.contains("    text = \"\"\"\nline one\n  line two\n\"\"\""),
+            "{formatted}"
+        );
+        assert!(formatted.contains("\n    return text\n"), "{formatted}");
+        assert_eq!(format_document_text(&formatted, "python", 4), formatted);
+
+        for (language, source, literal) in [
+            (
+                "go",
+                "func main() {\n    text := `\nline one\n  line two\n`\n    _ = text\n}\n",
+                "`\nline one\n  line two\n`",
+            ),
+            (
+                "rust",
+                "fn main() {\n    let text = r#\"\nline one\n  line two\n\"#;\n    println!(\"{text}\");\n}\n",
+                "r#\"\nline one\n  line two\n\"#",
+            ),
+            (
+                "javascript",
+                "function message() {\n  const text = `\nline one\n  line two\n`;\n  return text;\n}\n",
+                "`\nline one\n  line two\n`",
+            ),
+            (
+                "cpp",
+                "void message() {\n    const char* text = R\"tag(\nline { one\n  line two\n)tag\";\n}\n",
+                "R\"tag(\nline { one\n  line two\n)tag\"",
+            ),
+        ] {
+            let formatted = format_document_text(source, language, 4);
+            assert!(formatted.contains(literal), "{language}: {formatted}");
+            assert_eq!(format_document_text(&formatted, language, 4), formatted);
+        }
+    }
+
+    #[test]
+    fn refuses_to_rewrite_documents_with_unbalanced_delimiters() {
+        let python = "value = (\n".repeat(400);
+        assert_eq!(format_document_text(&python, "python", 4), python);
+
+        let cpp = "void run() {\n    call(\n";
+        assert_eq!(format_document_text(cpp, "cpp", 4), cpp);
+    }
+
+    #[test]
+    fn preserves_crlf_and_hard_tab_indentation() {
+        let python = "def sum_values(a: int, b: int) -> int:\r\n    return a + b\r\n";
+        let formatted = format_document_text(python, "python", 4);
+        assert!(formatted.contains("\r\n"), "{formatted:?}");
+        assert_eq!(
+            formatted.matches('\n').count(),
+            formatted.matches("\r\n").count()
+        );
+        assert_eq!(format_document_text(&formatted, "python", 4), formatted);
+
+        let go = "package main\nfunc main() {\n\tvalue := 1\n\tlong_name := 2\n\t_ = value + long_name\n}\n";
+        let formatted = format_document_text_with_options(go, "go", 4, false);
+        assert!(formatted.contains("\n\tvalue"), "{formatted}");
+        assert!(formatted.contains("\n\tlong_name"), "{formatted}");
+        assert_eq!(
+            format_document_text_with_options(&formatted, "go", 4, false),
+            formatted
+        );
+    }
+
+    #[test]
+    fn cpp_declaration_sections_are_idempotent() {
+        let source = "void run()\n{\nint worker_count = 16;\nint queue_depth = 1024;\nint retry_limit = 5;\nuint64_t total_requests = 1000000;\nuint64_t completed = 875000;\nuint64_t failed = 12500;\ndouble cpu_usage = 73.25;\ndouble memory_usage = 61.80;\ndouble disk_usage = 44.15;\n}\n";
+        let formatted = format_document_text(source, "cpp", 4);
+        assert!(
+            formatted.contains("retry_limit    = 5;\n\n    uint64_t"),
+            "{formatted}"
+        );
+        assert!(
+            formatted.contains("failed         = 12500;\n\n    double"),
+            "{formatted}"
+        );
+        assert_eq!(format_document_text(&formatted, "cpp", 4), formatted);
     }
 
     #[test]

@@ -47,17 +47,52 @@ jobs:
           toolchain: 1.97.1
       - name: Build the native helper
         run: cargo build --locked --release -p zed-vertical-align-lsp
+      - name: Smoke-test the native helper
+        run: python3 scripts/lsp-smoke-test.py target/release/zed-vertical-align-lsp
       - name: Package helper and checksum
         shell: bash
         run: |
           mkdir dist
           cp target/release/zed-vertical-align-lsp dist/zed-vertical-align-lsp
           tar -C dist -czf "dist/zed-vertical-align-lsp-${ASSET_NAME}.tar.gz" zed-vertical-align-lsp
-          shasum -a 256 "dist/zed-vertical-align-lsp-${ASSET_NAME}.tar.gz" > "dist/zed-vertical-align-lsp-${ASSET_NAME}.tar.gz.sha256"
+          (
+            cd dist
+            shasum -a 256 "zed-vertical-align-lsp-${ASSET_NAME}.tar.gz" > "zed-vertical-align-lsp-${ASSET_NAME}.tar.gz.sha256"
+          )
           rm dist/zed-vertical-align-lsp
       - uses: actions/upload-artifact@v4
         with:
           name: zed-vertical-align-lsp-${{ matrix.asset_name }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  helper-windows:
+    name: Build helper (windows-x86_64)
+    needs: validate
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+      - name: Build the native helper
+        run: cargo build --locked --release -p zed-vertical-align-lsp
+      - name: Smoke-test the native helper
+        shell: pwsh
+        run: python scripts/lsp-smoke-test.py target/release/zed-vertical-align-lsp.exe
+      - name: Package helper and checksum
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/zed-vertical-align-lsp.exe dist/zed-vertical-align-lsp.exe
+          Compress-Archive -Path dist/zed-vertical-align-lsp.exe -DestinationPath dist/zed-vertical-align-lsp-windows-x86_64.zip
+          $hash = (Get-FileHash dist/zed-vertical-align-lsp-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  zed-vertical-align-lsp-windows-x86_64.zip" | Set-Content -NoNewline dist/zed-vertical-align-lsp-windows-x86_64.zip.sha256
+          Remove-Item dist/zed-vertical-align-lsp.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zed-vertical-align-lsp-windows-x86_64
           path: dist/
           if-no-files-found: error
           retention-days: 14
@@ -74,19 +109,21 @@ jobs:
           targets: wasm32-wasip2
       - run: cargo build --locked --release --target wasm32-wasip2 -p zed-vertical-align-extension
       - run: |
-          mkdir dist
-          cp target/wasm32-wasip2/release/zed_vertical_align_extension.wasm dist/zed-vertical-align-extension.wasm
+          mkdir -p dist/vertical-align-lsp
+          cp extension.toml README.md LICENSE dist/vertical-align-lsp/
+          cp target/wasm32-wasip2/release/zed_vertical_align_extension.wasm dist/vertical-align-lsp/extension.wasm
+          tar -C dist -czf zed-vertical-align-extension.tar.gz vertical-align-lsp
       - uses: actions/upload-artifact@v4
         with:
           name: zed-vertical-align-extension-wasm
-          path: dist/
+          path: zed-vertical-align-extension.tar.gz
           if-no-files-found: error
           retention-days: 14
 
   publish:
     name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [helper, extension]
+    needs: [helper, helper-windows, extension]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

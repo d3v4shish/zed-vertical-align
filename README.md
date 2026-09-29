@@ -2,7 +2,7 @@
 
 A Zed extension that formats and vertically aligns independent code blocks
 through Zed's standard formatting commands. GitHub Actions builds native helpers
-for Linux x86_64, macOS Apple Silicon, and macOS Intel.
+for Linux x86_64, Windows x86_64, macOS Apple Silicon, and macOS Intel.
 
 ## Why this exists
 
@@ -32,7 +32,9 @@ between short mixed-type declaration groups. Attached continuations such as `els
 and `catch`, Rust attributes and their item, and verified operator-led expression
 chains remain contiguous. Comments, indentation
 changes, and separator kinds create independent alignment blocks. They never share
-one file-wide alignment column.
+one file-wide alignment column. Multiline literal contents and documents with
+unmatched delimiters are left unchanged, so formatting a draft cannot change a
+string value or amplify incomplete indentation.
 
 ## What is interesting technically
 
@@ -47,9 +49,12 @@ See [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## How it works
 
-Install the helper on the PATH visible to Zed, install this directory as a dev
-extension, then configure Zed to use `zed-vertical-align` as its formatter. See
-[BUILD.md](BUILD.md).
+Install the helper on the PATH visible to Zed, install the extension bundle as a
+dev extension, then configure Zed to use `zed-vertical-align` as its formatter.
+See [BUILD.md](BUILD.md).
+
+The project works with stock Zed. The helper must run on the machine that owns the
+worktree, so remote worktrees need the helper installed on the remote host.
 
 ### Zed settings
 
@@ -151,13 +156,21 @@ Contiguous standard output and diagnostic calls also align simple static labels 
 `:`, `=`, or `|` inside their string literals. This intentionally changes rendered
 output spacing; dynamic, raw, multiline, URL-like, and custom-wrapper strings are left alone.
 
+The formatter preserves the editor's line ending and `insert_spaces` setting. For
+hard-tabs mode, indentation it introduces uses tabs while alignment inside a line
+continues to use spaces.
+
 ## Limitations
 
 Local development requires Rust, the `wasm32-wasip2` target, and a helper
 executable on the PATH seen by Zed. GitHub Releases provide helpers for Linux
-x86_64 and macOS (Apple Silicon and Intel); Windows is not released yet. The
+x86_64, Windows x86_64, and macOS (Apple Silicon and Intel). The
 extension preserves tokens and therefore does not repair syntax errors such as
 `RE#include`. It cannot provide custom alignment keybindings.
+
+The extension is ready for Zed's public registry: its identifier follows the
+registry naming rules and releases contain an installable extension bundle. Registry
+publication itself requires a separate pull request to `zed-industries/extensions`.
 
 ## Related projects
 
